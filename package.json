@@ -1,0 +1,10 @@
+{
+  "name": "auth-form-functions",
+  "version": "1.0.0",
+  "dependencies": {
+    "@azure/data-tables": "^13.3.1"
+  },
+  "scripts": {
+    "start": "func start --port 7072"
+  }
+}
