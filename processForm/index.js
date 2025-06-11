@@ -1,29 +1,23 @@
 const crypto = require("crypto");
 const { TableClient } = require("@azure/data-tables");
 
-function verifyToken(id, lastName, tokenB64) {
-  const [hmac, salt] = Buffer.from(tokenB64, "base64").toString().split(":");
+function verifyToken(id, lastName, salt, tokenB64) {
+  const [hmacFromToken, saltFromToken] = Buffer.from(tokenB64, "base64").toString().split(":");
   const expected = crypto.createHmac("sha256", process.env.PEPPER)
-    .update(`${id}:${lastName}:${salt}`)
+    .update(`${id}:${lastName}:${saltFromToken}`)
     .digest("hex");
-  return hmac === expected ? salt : null;
+  return hmacFromToken === expected;
 }
 
 module.exports = async function (context, req) {
-  const { idSalted, lastNameSalted, token, ...formData } = req.body || {};
+  const { id, lastName, salt, token, ...formData } = req.body || {};
 
-  if (!idSalted || !lastNameSalted || !token) {
-    context.res = { status: 400, body: "Missing idSalted, lastNameSalted, or token" };
+  if (!id || !lastName || !salt || !token) {
+    context.res = { status: 400, body: "Missing id, lastName, salt, or token" };
     return;
   }
 
-  const decoded = Buffer.from(token, "base64").toString();
-  const salt = decoded.split(":")[1];
-
-  const id = idSalted.slice(0, -salt.length);
-  const lastName = lastNameSalted.slice(0, -salt.length);
-
-  if (!verifyToken(id, lastName, token)) {
+  if (!verifyToken(id, lastName, salt, token)) {
     context.res = { status: 401, body: "Token verification failed" };
     return;
   }

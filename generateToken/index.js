@@ -1,16 +1,22 @@
 const crypto = require("crypto");
 const { TableClient } = require("@azure/data-tables");
+const querystring = require("querystring");
 
 module.exports = async function (context, req) {
   context.log("=== Incoming Request Body ===");
   context.log(req.body);
 
-  const { id, lastName, redirectBaseUrl } = req.body || {};
+  // Parse form-encoded body if needed
+  let body = req.body;
+  if (typeof body === "string") {
+    body = querystring.parse(body);
+  }
+
+  const { id, lastName, redirectBaseUrl } = body;
 
   if (!id || !lastName || !redirectBaseUrl) {
     context.log("❌ Missing one or more required fields:");
     context.log(`id: ${id}, lastName: ${lastName}, redirectBaseUrl: ${redirectBaseUrl}`);
-
     context.res = {
       status: 400,
       body: "Missing id, lastName, or redirectBaseUrl"
@@ -40,8 +46,7 @@ module.exports = async function (context, req) {
       .digest("hex");
 
     const token = Buffer.from(`${hmac}:${salt}`).toString("base64");
-    const redirectUrl = `${redirectBaseUrl}?idSalted=${id}${salt}&lastNameSalted=${lastName}${salt}&token=${encodeURIComponent(token)}`;
-
+    const redirectUrl = `${redirectBaseUrl}?id=${id}&lastName=${lastName}&salt=${salt}&token=${encodeURIComponent(token)}`;
     context.log(`🚀 Redirecting to: ${redirectUrl}`);
 
     context.res = {
