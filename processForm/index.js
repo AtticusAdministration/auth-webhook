@@ -10,15 +10,44 @@ function verifyToken(id, lastName, salt, tokenB64) {
 }
 
 module.exports = async function (context, req) {
+  // CORS preflight handler
+  if (req.method === "OPTIONS") {
+    context.res = {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, ocp-apim-subscription-key"
+      }
+    };
+    return;
+  }
+
   const { id, lastName, salt, token, ...formData } = req.body || {};
 
   if (!id || !lastName || !salt || !token) {
-    context.res = { status: 400, body: "Missing id, lastName, salt, or token" };
+    context.res = {
+      status: 400,
+      body: "Missing id, lastName, salt, or token",
+      headers: {
+        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, ocp-apim-subscription-key"
+      }
+    };
     return;
   }
 
   if (!verifyToken(id, lastName, salt, token)) {
-    context.res = { status: 401, body: "Token verification failed" };
+    context.res = {
+      status: 401,
+      body: "Token verification failed",
+      headers: {
+        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, ocp-apim-subscription-key"
+      }
+    };
     return;
   }
 
@@ -33,6 +62,9 @@ module.exports = async function (context, req) {
       throw new Error("LastName mismatch");
     }
 
+    entity.JSON = JSON.stringify(formData);
+    await tableClient.updateEntity(entity, "Merge");
+
     const redirectId = Buffer.from(id).toString("base64");
     const redirectKey = Buffer.from(lastName).toString("base64");
     const redirectUrl = `https://newatticus.local/thank-you`;
@@ -40,14 +72,22 @@ module.exports = async function (context, req) {
     context.res = {
       status: 302,
       headers: {
-        Location: redirectUrl
+        Location: redirectUrl,
+        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, ocp-apim-subscription-key"
       }
     };
 
   } catch (err) {
     context.res = {
       status: err.statusCode === 404 ? 404 : 500,
-      body: err.message
+      body: err.message,
+      headers: {
+        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, ocp-apim-subscription-key"
+      }
     };
   }
 };
