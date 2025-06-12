@@ -35,7 +35,7 @@ module.exports = async function (context, req) {
 
     const redirectId = Buffer.from(id).toString("base64");
     const redirectKey = Buffer.from(lastName).toString("base64");
-    const redirectUrl = `https://newatticus.local/gpt-test/?id=${redirectId}&key=${redirectKey}`;
+    const redirectUrl = `https://newatticus.local/thank-you`;
 
     context.res = {
       status: 302,
