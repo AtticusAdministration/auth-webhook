@@ -23,12 +23,12 @@ module.exports = async function (context, req) {
     return;
   }
 
-  const { id, lastName, salt, token, ...formData } = req.body || {};
+  const { id, lastName, salt, token, pid, ...formData } = req.body || {};
 
-  if (!id || !lastName || !salt || !token) {
+  if (!id || !lastName || !salt || !token || !pid) {
     context.res = {
       status: 400,
-      body: "Missing id, lastName, salt, or token",
+      body: "Missing id, lastName, salt, token, or pid",
       headers: {
         "Access-Control-Allow-Origin": "https://newatticus.local",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -51,22 +51,42 @@ module.exports = async function (context, req) {
     return;
   }
 
-  const tableClient = TableClient.fromConnectionString(
+  const claimantTableClient = TableClient.fromConnectionString(
     process.env.AZURE_STORAGE_CONNECTION_STRING,
-    "AuthTable"
+    "ClaimantTable"
   );
 
+  // Log connection string (account name only), table name, and request body for debugging
+  const connStr = process.env.AZURE_STORAGE_CONNECTION_STRING || '';
+  const accountNameMatch = connStr.match(/AccountName=([^;]+)/);
+  const accountName = accountNameMatch ? accountNameMatch[1] : 'unknown';
+  context.log("[DEBUG] Using storage account:", accountName);
+  context.log("[DEBUG] Using table:", "ClaimantTable");
+  context.log("[DEBUG] Request body:", req.body);
+
   try {
-    const entity = await tableClient.getEntity("auth", id);
-    if (entity.lastName.toLowerCase() !== lastName.toLowerCase()) {
-      throw new Error("LastName mismatch");
-    }
+    // Prepare data for ClaimantTable (exclude id and pid)
+    const claimantData = { ...req.body };
+    delete claimantData.id;
+    delete claimantData.pid;
 
-    entity.JSON = JSON.stringify(formData);
-    await tableClient.updateEntity(entity, "Merge");
+    context.log("Attempting to insert into ClaimantTable", {
+      partitionKey: "claimant",
+      rowKey: "[random]",
+      JSON: JSON.stringify(claimantData),
+      pid: pid
+    });
 
-    const redirectId = Buffer.from(id).toString("base64");
-    const redirectKey = Buffer.from(lastName).toString("base64");
+    // Insert new record into ClaimantTable
+    await claimantTableClient.createEntity({
+      partitionKey: "claimant",
+      rowKey: crypto.randomUUID(),
+      JSON: JSON.stringify(claimantData),
+      pid: pid
+    });
+
+    context.log("Successfully inserted into ClaimantTable");
+
     const redirectUrl = `https://newatticus.local/thank-you`;
 
     context.res = {
@@ -80,6 +100,7 @@ module.exports = async function (context, req) {
     };
 
   } catch (err) {
+    context.log("Error inserting into ClaimantTable", err);
     context.res = {
       status: err.statusCode === 404 ? 404 : 500,
       body: err.message,

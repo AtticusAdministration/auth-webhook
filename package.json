@@ -5,6 +5,6 @@
     "@azure/data-tables": "^13.3.1"
   },
   "scripts": {
-    "start": "func start --port 7072"
+    "start": "func start --verbose --port 7072"
   }
 }
