@@ -1,5 +1,7 @@
 const crypto = require("crypto");
 const { TableClient } = require("@azure/data-tables");
+const PDFDocument = require("pdfkit");
+const { BlobServiceClient } = require("@azure/storage-blob");
 
 function verifyToken(id, lastName, salt, tokenB64) {
   const [hmacFromToken, saltFromToken] = Buffer.from(tokenB64, "base64").toString().split(":");
@@ -23,7 +25,7 @@ module.exports = async function (context, req) {
     return;
   }
 
-  const { id, lastName, salt, token, pid, ...formData } = req.body || {};
+  const { id, lastName, salt, token, pid, redirectUrl, ...formData } = req.body || {};
 
   if (!id || !lastName || !salt || !token || !pid) {
     context.res = {
@@ -87,20 +89,47 @@ module.exports = async function (context, req) {
 
     context.log("Successfully inserted into ClaimantTable");
 
-    const redirectUrl = `https://newatticus.local/thank-you`;
+    // --- PDF GENERATION ---
+    // 1. Generate PDF in memory
+    const doc = new PDFDocument();
+    let buffers = [];
+    doc.on('data', buffers.push.bind(buffers));
+    doc.text(`Claimant Submission`);
+    Object.entries(claimantData).forEach(([key, value]) => {
+      doc.text(`${key}: ${JSON.stringify(value)}`);
+    });
+    doc.end();
+    await new Promise(resolve => doc.on('end', resolve));
+    const pdfBuffer = Buffer.concat(buffers);
 
+    // 2. Upload PDF to Blob Storage
+    const blobServiceClient = BlobServiceClient.fromConnectionString(process.env.AZURE_STORAGE_CONNECTION_STRING);
+    const containerClient = blobServiceClient.getContainerClient("pdfs");
+    await containerClient.createIfNotExists();
+    const pdfName = `${crypto.randomUUID()}.pdf`;
+    const blockBlobClient = containerClient.getBlockBlobClient(pdfName);
+    await blockBlobClient.uploadData(pdfBuffer);
+    const pdfUrl = blockBlobClient.url;
+    context.log("PDF successfully uploaded to Blob Storage:", pdfUrl);
+
+    // 3. Use redirectUrl from request, or default
+    const finalRedirectUrl = redirectUrl || "https://newatticus.local/thank-you";
+
+    // 4. Return PDF URL in response headers (or body)
     context.res = {
       status: 302,
       headers: {
-        Location: redirectUrl,
+        Location: finalRedirectUrl,
+        "X-PDF-Url": pdfUrl,
         "Access-Control-Allow-Origin": "https://newatticus.local",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, ocp-apim-subscription-key"
-      }
+      },
+      body: { pdfUrl }
     };
 
   } catch (err) {
-    context.log("Error inserting into ClaimantTable", err);
+    context.log("Error inserting into ClaimantTable or generating PDF", err);
     context.res = {
       status: err.statusCode === 404 ? 404 : 500,
       body: err.message,

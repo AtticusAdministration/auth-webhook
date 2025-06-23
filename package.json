@@ -2,7 +2,9 @@
   "name": "auth-form-functions",
   "version": "1.0.0",
   "dependencies": {
-    "@azure/data-tables": "^13.3.1"
+    "@azure/data-tables": "^13.3.1",
+    "@azure/storage-blob": "^12.27.0",
+    "pdfkit": "^0.17.1"
   },
   "scripts": {
     "start": "func start --verbose --port 7072"
