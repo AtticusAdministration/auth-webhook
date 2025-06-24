@@ -94,9 +94,25 @@ module.exports = async function (context, req) {
     const doc = new PDFDocument();
     let buffers = [];
     doc.on('data', buffers.push.bind(buffers));
-    doc.text(`Claimant Submission`);
+    doc.text('Your Claimant Submission', { underline: true });
+    doc.moveDown();
+    // Print each field except files, salt, and token
     Object.entries(claimantData).forEach(([key, value]) => {
-      doc.text(`${key}: ${JSON.stringify(value)}`);
+      if (key === 'files' && value && typeof value === 'object') {
+        // Print file names for each file array in files
+        Object.entries(value).forEach(([fileField, fileArr]) => {
+          if (Array.isArray(fileArr)) {
+            doc.text(`${fileField}:`);
+            fileArr.forEach(fileObj => {
+              if (fileObj && fileObj.name) {
+                doc.text(`  - ${fileObj.name}`);
+              }
+            });
+          }
+        });
+      } else if (key !== 'files' && key !== 'salt' && key !== 'token') {
+        doc.text(`${key}: ${value}`);
+      }
     });
     doc.end();
     await new Promise(resolve => doc.on('end', resolve));
