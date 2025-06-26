@@ -32,7 +32,25 @@ module.exports = async function (context, req) {
   try {
     context.log(`🔍 Looking up entity for PartitionKey: 'auth', RowKey: '${id}'`);
     const entity = await tableClient.getEntity("auth", id);
-    context.log("✅ Entity retrieved:", entity);
+
+    // Fetch ProjectFormJSON entity (PartitionKey: 'ProjectFormJSON', RowKey: id)
+    let projectFormJsonEntity;
+    try {
+      projectFormJsonEntity = await tableClient.getEntity("ProjectFormJSON", id);
+      context.log("✅ ProjectFormJSON entity found for id:", id);
+    } catch (e) {
+      context.log("⚠️ ProjectFormJSON entity not found for id:", id);
+      projectFormJsonEntity = null;
+    }
+
+    context.log("✅ Entity retrieved:", {
+      id: entity.rowKey,
+      lastName: entity.lastName,
+      hasProjectFormJson: !!projectFormJsonEntity,
+      projectFormJsonSize: projectFormJsonEntity && projectFormJsonEntity.JSON
+        ? Buffer.byteLength(projectFormJsonEntity.JSON, 'utf8')
+        : 0
+    });
 
     if (entity.lastName.toLowerCase() !== lastName.toLowerCase()) {
       context.log(`❌ Last name mismatch. Expected: ${entity.lastName}, Provided: ${lastName}`);
@@ -49,10 +67,31 @@ module.exports = async function (context, req) {
     const redirectUrl = `${redirectBaseUrl}?id=${id}&lastName=${lastName}&salt=${salt}&token=${encodeURIComponent(token)}`;
     context.log(`🚀 Redirecting to: ${redirectUrl}`);
 
+    // Fetch all entities in the table (may be paged for large tables)
+    let allEntities = [];
+    for await (const entity of tableClient.listEntities()) {
+      allEntities.push(entity);
+    }
+    // Filter to only those matching id and lastName (case-insensitive)
+    const matchingEntities = allEntities.filter(e =>
+      e.rowKey === id &&
+      e.lastName && e.lastName.toLowerCase() === lastName.toLowerCase()
+    );
+    context.log(`📦 Returning ${matchingEntities.length} entities matching id and lastName from AuthTable.`);
+
+    // Fetch ProjectFormJSON column from the main entity (PartitionKey: 'auth', RowKey: id)
+    const projectFormJson = entity.ProjectFormJSON || null;
+    context.log("✅ ProjectFormJSON column found in entity:", !!projectFormJson, projectFormJson ? `size: ${Buffer.byteLength(projectFormJson, 'utf8')}` : '');
+
     context.res = {
-      status: 302,
+      status: 200,
       headers: {
+        "Content-Type": "application/json",
         Location: redirectUrl
+      },
+      body: {
+        projectFormJson: projectFormJson,
+        projectId: id
       }
     };
 
