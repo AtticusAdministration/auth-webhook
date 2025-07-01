@@ -3,6 +3,20 @@ const { TableClient } = require("@azure/data-tables");
 const querystring = require("querystring");
 
 module.exports = async function (context, req) {
+  // Handle CORS preflight
+  if (req.method === "OPTIONS") {
+    context.res = {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "86400"
+      }
+    };
+    return;
+  }
+
   context.log("=== Incoming Request Body ===");
   context.log(req.body);
 
@@ -19,6 +33,11 @@ module.exports = async function (context, req) {
     context.log(`id: ${id}, lastName: ${lastName}, redirectBaseUrl: ${redirectBaseUrl}`);
     context.res = {
       status: 400,
+      headers: {
+        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+      },
       body: "Missing id, lastName, or redirectBaseUrl"
     };
     return;
@@ -67,18 +86,6 @@ module.exports = async function (context, req) {
     const redirectUrl = `${redirectBaseUrl}?id=${id}&lastName=${lastName}&salt=${salt}&token=${encodeURIComponent(token)}`;
     context.log(`🚀 Redirecting to: ${redirectUrl}`);
 
-    // Fetch all entities in the table (may be paged for large tables)
-    let allEntities = [];
-    for await (const entity of tableClient.listEntities()) {
-      allEntities.push(entity);
-    }
-    // Filter to only those matching id and lastName (case-insensitive)
-    const matchingEntities = allEntities.filter(e =>
-      e.rowKey === id &&
-      e.lastName && e.lastName.toLowerCase() === lastName.toLowerCase()
-    );
-    context.log(`📦 Returning ${matchingEntities.length} entities matching id and lastName from AuthTable.`);
-
     // Fetch ProjectFormJSON column from the main entity (PartitionKey: 'auth', RowKey: id)
     const projectFormJson = entity.ProjectFormJSON || null;
     context.log("✅ ProjectFormJSON column found in entity:", !!projectFormJson, projectFormJson ? `size: ${Buffer.byteLength(projectFormJson, 'utf8')}` : '');
@@ -87,11 +94,14 @@ module.exports = async function (context, req) {
       status: 200,
       headers: {
         "Content-Type": "application/json",
-        Location: redirectUrl
+        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
       },
       body: {
         projectFormJson: projectFormJson,
-        projectId: id
+        projectId: id,
+        redirectUrl
       }
     };
 
@@ -99,6 +109,11 @@ module.exports = async function (context, req) {
     context.log("💥 Error during lookup or validation:", err.message);
     context.res = {
       status: 401,
+      headers: {
+        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+      },
       body: "Invalid ID or lastName"
     };
   }
