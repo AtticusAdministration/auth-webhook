@@ -26,11 +26,11 @@ module.exports = async function (context, req) {
     body = querystring.parse(body);
   }
 
-  const { id, lastName, redirectBaseUrl } = body;
+  const { id, lastName, redirectBaseUrl, pid } = body;
 
-  if (!id || !lastName || !redirectBaseUrl) {
+  if (!id || !lastName || !redirectBaseUrl || !pid) {
     context.log("❌ Missing one or more required fields:");
-    context.log(`id: ${id}, lastName: ${lastName}, redirectBaseUrl: ${redirectBaseUrl}`);
+    context.log(`id: ${id}, lastName: ${lastName}, redirectBaseUrl: ${redirectBaseUrl}, pid: ${pid}`);
     context.res = {
       status: 400,
       headers: {
@@ -38,58 +38,62 @@ module.exports = async function (context, req) {
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type"
       },
-      body: "Missing id, lastName, or redirectBaseUrl"
+      body: "Missing id, lastName, redirectBaseUrl, or pid"
     };
     return;
   }
 
   const tableClient = TableClient.fromConnectionString(
     process.env.AZURE_STORAGE_CONNECTION_STRING,
-    "AuthTable"
+    "Claimants"
+  );
+
+  // Add TableClient for FormTableJSON
+  const formTableClient = TableClient.fromConnectionString(
+    process.env.AZURE_STORAGE_CONNECTION_STRING,
+    "FormTableJSON"
   );
 
   try {
-    context.log(`🔍 Looking up entity for PartitionKey: 'auth', RowKey: '${id}'`);
-    const entity = await tableClient.getEntity("auth", id);
+    context.log(`🔍 Looking up entity for RowKey: '${id}' in Claimants`);
+    const entity = await tableClient.getEntity("auth", id); // Empty PartitionKey for single partition tables
 
-    // Fetch ProjectFormJSON entity (PartitionKey: 'ProjectFormJSON', RowKey: id)
-    let projectFormJsonEntity;
+    // Check last_name property (case-insensitive)
+    if (!entity.last_name || entity.last_name.toLowerCase() !== lastName.toLowerCase()) {
+      context.log(`❌ last_name mismatch. Expected: ${entity.last_name}, Provided: ${lastName}`);
+      throw new Error("Unauthorized: last_name mismatch");
+    }
+
+    // Fetch form JSON from FormTableJSON where PartitionKey == pid (ignore RowKey)
+    let projectFormJson = null;
     try {
-      projectFormJsonEntity = await tableClient.getEntity("ProjectFormJSON", id);
-      context.log("✅ ProjectFormJSON entity found for id:", id);
+      let found = false;
+      for await (const formEntity of formTableClient.listEntities({ queryOptions: { filter: `PartitionKey eq '${pid}'` } })) {
+        projectFormJson = formEntity.JSON || null;
+        context.log("✅ Form JSON found for pid:", pid, "RowKey:", formEntity.rowKey);
+        // Test if projectFormJson is valid JSON (if it's a string)
+        if (typeof projectFormJson === 'string') {
+          try {
+            const parsed = JSON.parse(projectFormJson);
+            context.log('[DEBUG] projectFormJson is valid JSON.');
+          } catch (jsonErr) {
+            context.log('[ERROR] projectFormJson is NOT valid JSON:', jsonErr.message);
+            context.log('[ERROR] Offending JSON string:', projectFormJson);
+          }
+        } else {
+          context.log('[DEBUG] projectFormJson is already an object/array.');
+        }
+        found = true;
+        break;
+      }
+      if (!found) {
+        context.log("⚠️ Form JSON not found for pid:", pid);
+      }
     } catch (e) {
-      context.log("⚠️ ProjectFormJSON entity not found for id:", id);
-      projectFormJsonEntity = null;
+      context.log("⚠️ Error during FormTableJSON lookup for pid:", pid, e.message || e);
     }
 
-    context.log("✅ Entity retrieved:", {
-      id: entity.rowKey,
-      lastName: entity.lastName,
-      hasProjectFormJson: !!projectFormJsonEntity,
-      projectFormJsonSize: projectFormJsonEntity && projectFormJsonEntity.JSON
-        ? Buffer.byteLength(projectFormJsonEntity.JSON, 'utf8')
-        : 0
-    });
-
-    if (entity.lastName.toLowerCase() !== lastName.toLowerCase()) {
-      context.log(`❌ Last name mismatch. Expected: ${entity.lastName}, Provided: ${lastName}`);
-      throw new Error("Unauthorized: lastName mismatch");
-    }
-
-    const salt = crypto.randomBytes(8).toString("hex");
-    const payload = `${id}:${lastName}:${salt}`;
-    const hmac = crypto.createHmac("sha256", process.env.PEPPER)
-      .update(payload)
-      .digest("hex");
-
-    const token = Buffer.from(`${hmac}:${salt}`).toString("base64");
-    const redirectUrl = `${redirectBaseUrl}?id=${id}&lastName=${lastName}&salt=${salt}&token=${encodeURIComponent(token)}`;
-    context.log(`🚀 Redirecting to: ${redirectUrl}`);
-
-    // Fetch ProjectFormJSON column from the main entity (PartitionKey: 'auth', RowKey: id)
-    const projectFormJson = entity.ProjectFormJSON || null;
-    context.log("✅ ProjectFormJSON column found in entity:", !!projectFormJson, projectFormJson ? `size: ${Buffer.byteLength(projectFormJson, 'utf8')}` : '');
-
+    // Removed debug log of response body as requested
     context.res = {
       status: 200,
       headers: {
@@ -100,11 +104,10 @@ module.exports = async function (context, req) {
       },
       body: {
         projectFormJson: projectFormJson,
-        projectId: id,
-        redirectUrl
+        projectId: pid,
+        redirectUrl: redirectBaseUrl
       }
     };
-
   } catch (err) {
     context.log("💥 Error during lookup or validation:", err.message);
     context.res = {
@@ -114,7 +117,7 @@ module.exports = async function (context, req) {
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type"
       },
-      body: "Invalid ID or lastName"
+      body: "Invalid ID or last_name"
     };
   }
 };

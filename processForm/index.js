@@ -1,7 +1,5 @@
 const crypto = require("crypto");
 const { TableClient } = require("@azure/data-tables");
-const PDFDocument = require("pdfkit");
-const { BlobServiceClient } = require("@azure/storage-blob");
 
 function verifyToken(id, lastName, salt, tokenB64) {
   const [hmacFromToken, saltFromToken] = Buffer.from(tokenB64, "base64").toString().split(":");
@@ -25,12 +23,12 @@ module.exports = async function (context, req) {
     return;
   }
 
-  const { id, lastName, salt, token, pid, redirectUrl, ...formData } = req.body || {};
+  const { id, lastName, salt, token, ...formData } = req.body || {};
 
-  if (!id || !lastName || !salt || !token || !pid) {
+  if (!id || !lastName || !salt || !token) {
     context.res = {
       status: 400,
-      body: "Missing id, lastName, salt, token, or pid",
+      body: "Missing id, lastName, salt, or token",
       headers: {
         "Access-Control-Allow-Origin": "https://newatticus.local",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -53,99 +51,35 @@ module.exports = async function (context, req) {
     return;
   }
 
-  const claimantTableClient = TableClient.fromConnectionString(
+  const tableClient = TableClient.fromConnectionString(
     process.env.AZURE_STORAGE_CONNECTION_STRING,
-    "ClaimantTable"
+    "AuthTable"
   );
 
-  // Log connection string (account name only), table name, and request body for debugging
-  const connStr = process.env.AZURE_STORAGE_CONNECTION_STRING || '';
-  const accountNameMatch = connStr.match(/AccountName=([^;]+)/);
-  const accountName = accountNameMatch ? accountNameMatch[1] : 'unknown';
-  context.log("[DEBUG] Using storage account:", accountName);
-  context.log("[DEBUG] Using table:", "ClaimantTable");
-  context.log("[DEBUG] Request body:", req.body);
-
   try {
-    // Prepare data for ClaimantTable (exclude id and pid)
-    const claimantData = { ...req.body };
-    delete claimantData.id;
-    delete claimantData.pid;
+    const entity = await tableClient.getEntity("auth", id);
+    if (entity.lastName.toLowerCase() !== lastName.toLowerCase()) {
+      throw new Error("LastName mismatch");
+    }
 
-    context.log("Attempting to insert into ClaimantTable", {
-      partitionKey: "claimant",
-      rowKey: "[random]",
-      JSON: JSON.stringify(claimantData),
-      pid: pid
-    });
+    entity.JSON = JSON.stringify(formData);
+    await tableClient.updateEntity(entity, "Merge");
 
-    // Insert new record into ClaimantTable
-    await claimantTableClient.createEntity({
-      partitionKey: "claimant",
-      rowKey: crypto.randomUUID(),
-      JSON: JSON.stringify(claimantData),
-      pid: pid
-    });
+    const redirectId = Buffer.from(id).toString("base64");
+    const redirectKey = Buffer.from(lastName).toString("base64");
+    const redirectUrl = `https://newatticus.local/thank-you`;
 
-    context.log("Successfully inserted into ClaimantTable");
-
-    // --- PDF GENERATION ---
-    // 1. Generate PDF in memory
-    const doc = new PDFDocument();
-    let buffers = [];
-    doc.on('data', buffers.push.bind(buffers));
-    doc.text('Your Claimant Submission', { underline: true });
-    doc.moveDown();
-    // Print each field except files, salt, and token
-    Object.entries(claimantData).forEach(([key, value]) => {
-      if (key === 'files' && value && typeof value === 'object') {
-        // Print file names for each file array in files
-        Object.entries(value).forEach(([fileField, fileArr]) => {
-          if (Array.isArray(fileArr)) {
-            doc.text(`${fileField}:`);
-            fileArr.forEach(fileObj => {
-              if (fileObj && fileObj.name) {
-                doc.text(`  - ${fileObj.name}`);
-              }
-            });
-          }
-        });
-      } else if (key !== 'files' && key !== 'salt' && key !== 'token') {
-        doc.text(`${key}: ${value}`);
-      }
-    });
-    doc.end();
-    await new Promise(resolve => doc.on('end', resolve));
-    const pdfBuffer = Buffer.concat(buffers);
-
-    // 2. Upload PDF to Blob Storage
-    const blobServiceClient = BlobServiceClient.fromConnectionString(process.env.AZURE_STORAGE_CONNECTION_STRING);
-    const containerClient = blobServiceClient.getContainerClient("pdfs");
-    await containerClient.createIfNotExists();
-    const pdfName = `${crypto.randomUUID()}.pdf`;
-    const blockBlobClient = containerClient.getBlockBlobClient(pdfName);
-    await blockBlobClient.uploadData(pdfBuffer);
-    const pdfUrl = blockBlobClient.url;
-    context.log("PDF successfully uploaded to Blob Storage:", pdfUrl);
-
-    // 3. Use redirectUrl from request, or default
-    const finalRedirectUrl = redirectUrl || "https://newatticus.local/thank-you";
-
-    // 4. Return PDF URL in response headers (or body)
     context.res = {
       status: 302,
       headers: {
-        Location: finalRedirectUrl,
-        "X-PDF-Url": pdfUrl,
+        Location: redirectUrl,
         "Access-Control-Allow-Origin": "https://newatticus.local",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, ocp-apim-subscription-key"
-      },
-      body: { pdfUrl }
+      }
     };
 
   } catch (err) {
-    context.log("Error inserting into ClaimantTable or generating PDF", err);
     context.res = {
       status: err.statusCode === 404 ? 404 : 500,
       body: err.message,
