@@ -3,12 +3,23 @@ const { TableClient } = require("@azure/data-tables");
 const querystring = require("querystring");
 
 module.exports = async function (context, req) {
+  // Define allowed origins
+  const allowedOrigins = [
+    "http://localhost:8000",
+    "https://newatticus.local",
+    "https://www.mighty-geeks.com"
+  ];
+  
+  // Get the origin from the request
+  const origin = req.headers.origin;
+  const allowedOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
+
   // Handle CORS preflight
   if (req.method === "OPTIONS") {
     context.res = {
       status: 204,
       headers: {
-        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Origin": allowedOrigin,
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
         "Access-Control-Max-Age": "86400"
@@ -34,7 +45,7 @@ module.exports = async function (context, req) {
     context.res = {
       status: 400,
       headers: {
-        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Origin": allowedOrigin,
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type"
       },
@@ -98,7 +109,7 @@ module.exports = async function (context, req) {
       status: 200,
       headers: {
         "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Origin": allowedOrigin,
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type"
       },
@@ -113,7 +124,7 @@ module.exports = async function (context, req) {
     context.res = {
       status: 401,
       headers: {
-        "Access-Control-Allow-Origin": "https://newatticus.local",
+        "Access-Control-Allow-Origin": allowedOrigin,
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type"
       },
