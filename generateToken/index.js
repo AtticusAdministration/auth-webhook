@@ -117,7 +117,8 @@ module.exports = async function (context, req) {
       body: {
         projectFormJson: projectFormJson,
         projectId: pid,
-        redirectUrl: redirectBaseUrl
+        redirectUrl: redirectBaseUrl,
+        lastName: lastName,
       }
     };
   } catch (err) {
