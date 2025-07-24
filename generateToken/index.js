@@ -7,7 +7,8 @@ module.exports = async function (context, req) {
   const allowedOrigins = [
     "http://localhost:8000",
     "https://newatticus.local",
-    "https://www.mighty-geeks.com"
+    "https://www.mighty-geeks.com",
+    "https://mighty-geeks.com"
   ];
   
   // Get the origin from the request
