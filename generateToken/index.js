@@ -2,7 +2,136 @@ const crypto = require("crypto");
 const { TableClient } = require("@azure/data-tables");
 const querystring = require("querystring");
 
+/**
+ * Generates a secure authentication token for form submission with expiration
+ * Uses HMAC-SHA256 with server-side secret (PEPPER) for cryptographic security
+ * @param {string} id - User ID
+ * @param {string} lastName - User's last name
+ * @param {string} pid - Project ID
+ * @returns {Object} Token data including base64 token, salt, timestamps, and expiration info
+ */
+function generateSecureToken(id, lastName, pid) {
+  // Generate cryptographically secure random salt
+  const salt = crypto.randomBytes(16).toString('hex');
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + (15 * 60 * 1000); // 15 minutes from now
+  const expiresIn = 15 * 60 * 1000; // 15 minutes in milliseconds
+  
+  // Create payload with expiration data
+  const payload = `${id}:${lastName}:${pid}:${salt}:${issuedAt}:${expiresAt}`;
+  
+  // Create HMAC signature using server secret (PEPPER)
+  // This prevents token forgery as attackers don't have the PEPPER
+  const hmac = crypto.createHmac("sha256", process.env.PEPPER)
+    .update(payload)
+    .digest("hex");
+  
+  // Encode token components as base64 for safe transport
+  // Format: hmac:salt:issuedAt:expiresAt
+  const tokenPayload = `${hmac}:${salt}:${issuedAt}:${expiresAt}`;
+  const token = Buffer.from(tokenPayload).toString("base64");
+  
+  return { 
+    token, 
+    salt, 
+    issuedAt, 
+    expiresAt, 
+    expiresIn,
+    // Helper for easy expiration checking
+    isExpired: () => Date.now() > expiresAt
+  };
+}
+
+/**
+ * Verifies a token's authenticity and expiration status
+ * @param {string} token - Base64 encoded token to verify
+ * @param {string} id - Expected user ID
+ * @param {string} lastName - Expected user's last name
+ * @param {string} pid - Expected project ID
+ * @returns {Object} Verification result with success flag and details
+ */
+function verifySecureToken(token, id, lastName, pid) {
+  try {
+    // Decode the token
+    const decoded = Buffer.from(token, 'base64').toString('utf8');
+    const [hmac, salt, issuedAt, expiresAt] = decoded.split(':');
+    
+    if (!hmac || !salt || !issuedAt || !expiresAt) {
+      return { valid: false, error: "Invalid token format" };
+    }
+    
+    // Check if token is expired
+    const now = Date.now();
+    const expirationTime = parseInt(expiresAt);
+    if (now > expirationTime) {
+      return { valid: false, error: "Token expired", expiredAt: new Date(expirationTime) };
+    }
+    
+    // Recreate the expected HMAC signature
+    const payload = `${id}:${lastName}:${pid}:${salt}:${issuedAt}:${expiresAt}`;
+    const expectedHmac = crypto.createHmac("sha256", process.env.PEPPER)
+      .update(payload)
+      .digest("hex");
+    
+    // Use crypto.timingSafeEqual to prevent timing attacks
+    const hmacBuffer = Buffer.from(hmac, 'hex');
+    const expectedHmacBuffer = Buffer.from(expectedHmac, 'hex');
+    
+    if (hmacBuffer.length !== expectedHmacBuffer.length || 
+        !crypto.timingSafeEqual(hmacBuffer, expectedHmacBuffer)) {
+      return { valid: false, error: "Invalid token signature" };
+    }
+    
+    return { 
+      valid: true, 
+      issuedAt: new Date(parseInt(issuedAt)),
+      expiresAt: new Date(expirationTime),
+      remainingTime: expirationTime - now
+    };
+    
+  } catch (error) {
+    return { valid: false, error: "Token verification failed", details: error.message };
+  }
+}
+
+/**
+ * Validates environment configuration required for secure operation
+ * @param {Object} context - Azure Function context for logging
+ * @returns {Object} Validation result with success flag and error message
+ */
+function validateEnvironment(context) {
+  if (!process.env.PEPPER) {
+    context.log.error("🚨 PEPPER environment variable not configured - tokens cannot be generated securely");
+    return { valid: false, error: "Server configuration error" };
+  }
+  
+  if (!process.env.AZURE_STORAGE_CONNECTION_STRING) {
+    context.log.error("🚨 AZURE_STORAGE_CONNECTION_STRING not configured");
+    return { valid: false, error: "Storage configuration error" };
+  }
+  
+  return { valid: true };
+}
+
 module.exports = async function (context, req) {
+  // Validate environment configuration first
+  const envValidation = validateEnvironment(context);
+  if (!envValidation.valid) {
+    context.res = {
+      status: 500,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+      },
+      body: { error: envValidation.error }
+    };
+    return;
+  }
+
+  context.log("🔐 Token generation request received");
+
   // Define allowed origins
   const allowedOrigins = [
     "http://localhost:8000",
@@ -105,6 +234,12 @@ module.exports = async function (context, req) {
       context.log("⚠️ Error during FormTableJSON lookup for pid:", pid, e.message || e);
     }
 
+    // Generate secure authentication token for this validated user
+    const tokenData = generateSecureToken(id, lastName, pid);
+    context.log(`🔑 Secure token generated for user ${id}`);
+    context.log(`🕒 Token expires at: ${new Date(tokenData.expiresAt).toISOString()}`);
+    context.log(`⏱️ Token valid for: ${Math.round(tokenData.expiresIn / 1000 / 60)} minutes`);
+
     // Removed debug log of response body as requested
     context.res = {
       status: 200,
@@ -118,7 +253,16 @@ module.exports = async function (context, req) {
         projectFormJson: projectFormJson,
         projectId: pid,
         redirectUrl: redirectBaseUrl,
+        id: id, // Return the user ID for form submission
         lastName: lastName,
+        // Add secure token data for authenticated form submission
+        authToken: tokenData.token,
+        tokenSalt: tokenData.salt,
+        tokenIssuedAt: tokenData.issuedAt,
+        tokenExpiresAt: tokenData.expiresAt,
+        tokenExpiresIn: tokenData.expiresIn, // milliseconds until expiration
+        // Helper for frontend to check expiration
+        tokenValidUntil: new Date(tokenData.expiresAt).toISOString()
       }
     };
   } catch (err) {
