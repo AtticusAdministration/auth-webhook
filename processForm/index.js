@@ -205,15 +205,21 @@ module.exports = async function (context, req) {
   context.log(`✅ Token verified successfully for user ${userId}`);
   context.log(`🕒 Token remaining time: ${Math.round(tokenVerification.remainingTime / 1000 / 60)} minutes`);
 
-  // Connect to the Claimants table for user validation and data storage
-  const tableClient = TableClient.fromConnectionString(
+  // Connect to the Claimants table for user validation
+  const claimantsTableClient = TableClient.fromConnectionString(
     process.env.AZURE_STORAGE_CONNECTION_STRING,
     "Claimants"
   );
 
+  // Connect to the Submissions table for storing form data
+  const submissionsTableClient = TableClient.fromConnectionString(
+    process.env.AZURE_STORAGE_CONNECTION_STRING,
+    "Submissions"
+  );
+
   try {
     context.log(`🔍 Looking up user entity for RowKey: '${userId}' in Claimants`);
-    const entity = await tableClient.getEntity("auth", userId);
+    const entity = await claimantsTableClient.getEntity("auth", userId);
     
     // Double-check lastName matches (defense in depth)
     if (!entity.last_name || entity.last_name.toLowerCase() !== userLastName.toLowerCase()) {
@@ -223,15 +229,24 @@ module.exports = async function (context, req) {
 
     context.log(`✅ User validated: ${userId} (${userLastName})`);
     
-    // Store the form data as JSON in the entity
-    entity.JSON = JSON.stringify(formData);
-    entity.submittedAt = new Date().toISOString();
-    entity.projectId = projectId;
+    // Generate a unique RowKey for the submission
+    const submissionId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const submittedAt = new Date().toISOString();
     
-    context.log("💾 Updating entity with form data");
-    await tableClient.updateEntity(entity, "Merge");
+    // Create submission entity for the Submissions table
+    const submissionEntity = {
+      partitionKey: "submissions",
+      rowKey: submissionId,
+      timestamp: submittedAt,
+      claimant_id: userId,
+      project_id: projectId,
+      submission_json: JSON.stringify(formData)
+    };
     
-    context.log("✅ Form data saved successfully");
+    context.log("💾 Creating new submission entity in Submissions table");
+    await submissionsTableClient.createEntity(submissionEntity);
+    
+    context.log("✅ Form data saved successfully to Submissions table");
 
     // Determine redirect URL (you may want to customize this based on projectId)
     const redirectUrl = `${allowedOrigin}/thank-you?pid=${projectId}`;
@@ -246,7 +261,8 @@ module.exports = async function (context, req) {
         success: true, 
         message: "Form submitted successfully",
         redirectUrl: redirectUrl,
-        submittedAt: entity.submittedAt
+        submittedAt: submittedAt,
+        submissionId: submissionId
       }
     };
 
