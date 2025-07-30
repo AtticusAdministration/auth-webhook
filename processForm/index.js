@@ -1,5 +1,261 @@
 const crypto = require("crypto");
 const { TableClient } = require("@azure/data-tables");
+const { BlobServiceClient } = require("@azure/storage-blob");
+const PDFDocument = require('pdfkit');
+
+/**
+ * Generates PDF from form template and submission data using PDFKit
+ * @param {Object|string} projectFormJson - Form template with steps structure
+ * @param {Object} submissionData - User submitted form data
+ * @returns {Buffer} PDF buffer
+ */
+async function generatePdfFromData(projectFormJson, submissionData) {
+  return new Promise((resolve, reject) => {
+    try {
+      let formStructure;
+      
+      // Parse projectFormJson if it's a string
+      try {
+        formStructure = typeof projectFormJson === 'string' 
+          ? JSON.parse(projectFormJson) 
+          : projectFormJson;
+      } catch (error) {
+        formStructure = { steps: [] };
+      }
+
+      const doc = new PDFDocument({ margin: 50 });
+      const buffers = [];
+      
+      // Collect PDF data
+      doc.on('data', buffers.push.bind(buffers));
+      doc.on('end', () => {
+        const pdfBuffer = Buffer.concat(buffers);
+        resolve(pdfBuffer);
+      });
+      doc.on('error', reject);
+
+      // Header - Extract title from form structure or use default
+      const formTitle = formStructure.title || 'Form Submission';
+      doc.fontSize(18)
+         .fillColor('#4a90e2')
+         .font('Helvetica-Bold')
+         .text(formTitle, 50, 50, { align: 'center' });
+      
+      doc.moveDown();
+      
+      // Submission info
+      doc.fontSize(11)
+         .fillColor('#666666')
+         .text(`Submitted by: ${submissionData.firstName || ''} ${submissionData.middleInitial || ''} ${submissionData.lastName || ''}`.replace(/\s+/g, ' '), { align: 'center' })
+         .text(`Submission ID: ${submissionData.submissionId || 'N/A'}`, { align: 'center' })
+         .text(`Date: ${new Date().toLocaleDateString()}`, { align: 'center' });
+      
+      doc.moveDown(1.5);
+      
+      // Draw a line
+      doc.strokeColor('#4a90e2')
+         .lineWidth(2)
+         .moveTo(50, doc.y)
+         .lineTo(545, doc.y)
+         .stroke();
+      
+      doc.moveDown();
+
+      // Process form structure dynamically
+      if (formStructure.steps && Array.isArray(formStructure.steps)) {
+        formStructure.steps.forEach((step, index) => {
+          addStepToPdf(doc, step, submissionData, index + 1);
+        });
+      } else if (formStructure.fields && Array.isArray(formStructure.fields)) {
+        // Handle field-based forms
+        formStructure.fields.forEach(field => {
+          const value = submissionData[field.name] || submissionData[field.id] || 'Not provided';
+          addFormField(doc, field.label || field.name || 'Field', value, field.required);
+        });
+      } else {
+        // Fallback: iterate through submission data
+        Object.entries(submissionData).forEach(([key, value]) => {
+          if (key !== 'submissionId' && key !== 'projectId') {
+            addFormField(doc, formatFieldName(key), value);
+          }
+        });
+      }
+
+      // Footer
+      doc.fontSize(10)
+         .fillColor('#666666')
+         .text('This document was automatically generated from form submission data.', 50, doc.page.height - 100)
+         .text(`Project ID: ${submissionData.projectId || 'Unknown'}`, 50, doc.page.height - 85);
+
+      doc.end();
+      
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+/**
+ * Adds a form step to the PDF document
+ * @param {PDFDocument} doc - PDFKit document instance
+ * @param {Object} step - Step object from form structure
+ * @param {Object} submissionData - User submitted data
+ * @param {number} stepNumber - Step number for display
+ */
+function addStepToPdf(doc, step, submissionData, stepNumber) {
+  // Check if we need a new page
+  if (doc.y > doc.page.height - 150) {
+    doc.addPage();
+  }
+
+  // Step title
+  doc.fontSize(14)
+     .fillColor('#4a90e2')
+     .font('Helvetica-Bold')
+     .text(`${stepNumber}. ${step.title}`, 50, doc.y);
+  
+  doc.moveDown(0.5);
+
+  // Step instruction
+  if (step.instruction) {
+    doc.fontSize(11)
+       .fillColor('#666666')
+       .font('Helvetica-Oblique')
+       .text(step.instruction, 50, doc.y, { width: 495 });
+    
+    doc.moveDown(0.5);
+  }
+
+  // Process fields dynamically based on step content
+  if (step.html) {
+    // Extract field information from HTML (basic parsing)
+    const fieldMatches = step.html.match(/name=['"]([^'"]+)['"]/g);
+    if (fieldMatches) {
+      fieldMatches.forEach(match => {
+        const fieldName = match.match(/name=['"]([^'"]+)['"]/)[1];
+        const value = submissionData[fieldName];
+        if (value !== undefined) {
+          addFormField(doc, formatFieldName(fieldName), value);
+        }
+      });
+    }
+  }
+
+  doc.moveDown(1);
+}
+
+/**
+ * Adds a form field to the PDF document
+ * @param {PDFDocument} doc - PDFKit document instance
+ * @param {string} label - Field label
+ * @param {any} value - Field value
+ * @param {boolean} required - Whether field is required
+ * @param {string} type - Field type (boolean, etc.)
+ */
+function addFormField(doc, label, value, required = false, type = 'text') {
+  // Check if we need a new page
+  if (doc.y > doc.page.height - 80) {
+    doc.addPage();
+  }
+  
+  const startY = doc.y;
+  const fieldHeight = 25;
+  
+  // Field background
+  doc.rect(45, startY - 3, 505, fieldHeight)
+     .fillColor('#f9f9f9')
+     .fill()
+     .strokeColor('#e0e0e0')
+     .lineWidth(0.5)
+     .stroke();
+  
+  // Required indicator
+  const requiredText = required ? ' *' : '';
+  
+  // Field label
+  doc.fontSize(10)
+     .fillColor('#4a90e2')
+     .font('Helvetica-Bold')
+     .text(label + requiredText + ':', 55, startY + 3);
+  
+  // Field value
+  let displayValue = formatFieldValue(value, type);
+  
+  doc.fontSize(10)
+     .fillColor('#333333')
+     .font('Helvetica')
+     .text(displayValue, 200, startY + 3, { width: 340 });
+  
+  doc.y = startY + fieldHeight + 2;
+}
+
+/**
+ * Formats field names for display
+ * @param {string} fieldName - Raw field name
+ * @returns {string} Formatted field name
+ */
+function formatFieldName(fieldName) {
+  return fieldName
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/^./, str => str.toUpperCase())
+    .trim();
+}
+
+/**
+ * Formats field values for display
+ * @param {any} value - Field value
+ * @param {string} type - Field type
+ * @returns {string} Formatted value
+ */
+function formatFieldValue(value, type = 'text') {
+  if (value === null || value === undefined || value === '') {
+    return 'Not provided';
+  }
+  
+  if (type === 'boolean' || typeof value === 'boolean') {
+    return value ? 'Yes' : 'No';
+  }
+  
+  if (typeof value === 'object') {
+    return JSON.stringify(value, null, 2);
+  }
+  
+  return String(value);
+}
+
+/**
+ * Uploads PDF to Azure Blob Storage
+ * @param {Buffer} pdfBuffer - PDF content as buffer
+ * @param {string} fileName - Name for the PDF file
+ * @param {string} containerName - Azure Blob container name
+ * @returns {string} Public URL of the uploaded PDF
+ */
+async function uploadPdfToBlob(pdfBuffer, fileName, containerName = 'submissions') {
+  const blobServiceClient = BlobServiceClient.fromConnectionString(
+    process.env.AZURE_STORAGE_CONNECTION_STRING
+  );
+  
+  const containerClient = blobServiceClient.getContainerClient(containerName);
+  
+  // Create container if it doesn't exist
+  try {
+    await containerClient.createIfNotExists({
+      access: 'blob' // Public read access for PDFs
+    });
+  } catch (error) {
+    // Container might already exist, continue
+  }
+  
+  const blobClient = containerClient.getBlockBlobClient(fileName);
+  
+  await blobClient.upload(pdfBuffer, pdfBuffer.length, {
+    blobHTTPHeaders: {
+      blobContentType: 'application/pdf'
+    }
+  });
+  
+  return blobClient.url;
+}
 
 /**
  * Verifies a token's authenticity and expiration status
@@ -233,6 +489,25 @@ module.exports = async function (context, req) {
     const submissionId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const submittedAt = new Date().toISOString();
     
+    // Get the project form JSON for PDF generation
+    const formTableClient = TableClient.fromConnectionString(
+      process.env.AZURE_STORAGE_CONNECTION_STRING,
+      "FormTableJSON"
+    );
+    
+    let projectFormJson = null;
+    try {
+      for await (const formEntity of formTableClient.listEntities({ 
+        queryOptions: { filter: `PartitionKey eq '${projectId}'` } 
+      })) {
+        projectFormJson = formEntity.JSON || null;
+        context.log("✅ Form JSON found for PDF generation");
+        break;
+      }
+    } catch (e) {
+      context.log("⚠️ Error fetching form JSON for PDF:", e.message);
+    }
+    
     // Create submission entity for the Submissions table
     const submissionEntity = {
       partitionKey: "submissions",
@@ -248,6 +523,17 @@ module.exports = async function (context, req) {
     
     context.log("✅ Form data saved successfully to Submissions table");
 
+    // Generate PDF using PDFKit
+    context.log("📄 Starting PDF generation with PDFKit...");
+    const pdfBuffer = await generatePdfFromData(projectFormJson, { ...formData, submissionId, projectId });
+    
+    // Upload PDF to Azure Blob Storage
+    const pdfFileName = `submission-${projectId}-${submissionId}.pdf`;
+    const pdfUrl = await uploadPdfToBlob(pdfBuffer, pdfFileName);
+    
+    context.log("✅ PDF generated and uploaded successfully");
+    context.log(`🔗 PDF URL: ${pdfUrl}`);
+
     // Determine redirect URL (you may want to customize this based on projectId)
     const redirectUrl = `${allowedOrigin}/thank-you?pid=${projectId}`;
 
@@ -262,7 +548,8 @@ module.exports = async function (context, req) {
         message: "Form submitted successfully",
         redirectUrl: redirectUrl,
         submittedAt: submittedAt,
-        submissionId: submissionId
+        submissionId: submissionId,
+        pdfUrl: pdfUrl
       }
     };
 
