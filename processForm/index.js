@@ -507,21 +507,6 @@ module.exports = async function (context, req) {
     } catch (e) {
       context.log("⚠️ Error fetching form JSON for PDF:", e.message);
     }
-    
-    // Create submission entity for the Submissions table
-    const submissionEntity = {
-      partitionKey: "submissions",
-      rowKey: submissionId,
-      timestamp: submittedAt,
-      claimant_id: userId,
-      project_id: projectId,
-      submission_json: JSON.stringify(formData)
-    };
-    
-    context.log("💾 Creating new submission entity in Submissions table");
-    await submissionsTableClient.createEntity(submissionEntity);
-    
-    context.log("✅ Form data saved successfully to Submissions table");
 
     // Generate PDF using PDFKit
     context.log("📄 Starting PDF generation with PDFKit...");
@@ -533,6 +518,27 @@ module.exports = async function (context, req) {
     
     context.log("✅ PDF generated and uploaded successfully");
     context.log(`🔗 PDF URL: ${pdfUrl}`);
+
+    // Include PDF URL in the form data for storage
+    const formDataWithPdf = {
+      ...formData,
+      pdfUrl: pdfUrl
+    };
+    
+    // Create submission entity for the Submissions table
+    const submissionEntity = {
+      partitionKey: "submissions",
+      rowKey: submissionId,
+      timestamp: submittedAt,
+      claimant_id: userId,
+      project_id: projectId,
+      submission_json: JSON.stringify(formDataWithPdf)
+    };
+    
+    context.log("💾 Creating new submission entity in Submissions table");
+    await submissionsTableClient.createEntity(submissionEntity);
+    
+    context.log("✅ Form data saved successfully to Submissions table");
 
     // Determine redirect URL (you may want to customize this based on projectId)
     const redirectUrl = `${allowedOrigin}/thank-you?pid=${projectId}`;
