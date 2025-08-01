@@ -126,9 +126,25 @@ function addStepToPdf(doc, step, submissionData, stepNumber) {
     doc.moveDown(0.5);
   }
 
-  // Process fields dynamically based on step content
+  // Add HTML content as text (for informational steps)
   if (step.html) {
-    // Extract field information from HTML (basic parsing)
+    // Clean HTML content for display
+    const cleanText = step.html
+      .replace(/<[^>]*>/g, ' ')  // Remove HTML tags
+      .replace(/&nbsp;/g, ' ')   // Replace &nbsp; with space
+      .replace(/\s+/g, ' ')      // Collapse multiple spaces
+      .trim();
+    
+    if (cleanText && cleanText.length > 0) {
+      doc.fontSize(10)
+         .fillColor('#333333')
+         .font('Helvetica')
+         .text(cleanText, 60, doc.y, { width: 485 });
+      
+      doc.moveDown(0.5);
+    }
+
+    // Extract and add form fields if present
     const fieldMatches = step.html.match(/name=['"]([^'"]+)['"]/g);
     if (fieldMatches) {
       fieldMatches.forEach(match => {
