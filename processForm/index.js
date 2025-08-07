@@ -304,10 +304,19 @@ function verifyEnhancedToken(token, providedSalt, providedExpiresAt, providedVal
       return { valid: false, error: "Token expiration timestamp mismatch" };
     }
 
-    // Parse timestamps
+    // Parse timestamps - handle both numeric timestamps and ISO strings
     const now = Date.now();
     const tokenExpirationTime = parseInt(expiresAt);
-    const providedValidUntilTime = parseInt(providedValidUntil);
+    
+    // Handle tokenValidUntil - could be timestamp number or ISO string
+    let providedValidUntilTime;
+    if (typeof providedValidUntil === 'string' && providedValidUntil.includes('T')) {
+      // ISO string format
+      providedValidUntilTime = new Date(providedValidUntil).getTime();
+    } else {
+      // Timestamp number
+      providedValidUntilTime = parseInt(providedValidUntil);
+    }
 
     // Check if token is expired (using token's internal expiration)
     if (now > tokenExpirationTime) {
@@ -343,12 +352,20 @@ function verifyEnhancedToken(token, providedSalt, providedExpiresAt, providedVal
       return { valid: false, error: "Invalid token signature" };
     }
     
+    // Calculate remaining time correctly - find the shorter valid period
+    const tokenRemainingTime = tokenExpirationTime - now;
+    const validUntilRemainingTime = providedValidUntilTime - now;
+    
+    // Both times should be positive (future) since we already checked expiration above
+    // Take the minimum of the two remaining times to get the actual valid period
+    const actualRemainingTime = Math.min(tokenRemainingTime, validUntilRemainingTime);
+    
     return { 
       valid: true, 
       issuedAt: new Date(parseInt(issuedAt)),
       expiresAt: new Date(tokenExpirationTime),
       validUntil: new Date(providedValidUntilTime),
-      remainingTime: Math.min(tokenExpirationTime - now, providedValidUntilTime - now),
+      remainingTime: actualRemainingTime,
       salt: tokenSalt
     };
     
@@ -565,7 +582,13 @@ module.exports = async function (context, req) {
   // Verify the authentication token with enhanced validation
   context.log(`🔐 Verifying enhanced token for user ${userId}, project ${projectId}`);
   context.log(`🕒 Token expires at: ${new Date(parseInt(tokenExpiresAt)).toISOString()}`);
-  context.log(`🕒 Token valid until: ${new Date(parseInt(tokenValidUntil)).toISOString()}`);
+  
+  // Handle tokenValidUntil - could be timestamp number or ISO string
+  const validUntilTimestamp = typeof tokenValidUntil === 'string' && tokenValidUntil.includes('T')
+    ? new Date(tokenValidUntil).getTime()
+    : parseInt(tokenValidUntil);
+    
+  context.log(`🕒 Token valid until: ${new Date(validUntilTimestamp).toISOString()}`);
   
   const tokenVerification = verifyEnhancedToken(
     authToken, 
