@@ -274,7 +274,91 @@ async function uploadPdfToBlob(pdfBuffer, fileName, containerName = 'submissions
 }
 
 /**
- * Verifies a token's authenticity and expiration status
+ * Verifies a token's authenticity and expiration status with enhanced validation
+ * @param {string} token - Base64 encoded token to verify
+ * @param {string} providedSalt - Salt provided from request
+ * @param {string} providedExpiresAt - Expiration timestamp from request
+ * @param {string} providedValidUntil - Valid until timestamp from request
+ * @param {string} id - Expected user ID
+ * @param {string} lastName - Expected user's last name
+ * @param {string} pid - Expected project ID
+ * @returns {Object} Verification result with success flag and details
+ */
+function verifyEnhancedToken(token, providedSalt, providedExpiresAt, providedValidUntil, id, lastName, pid) {
+  try {
+    // Decode the token
+    const decoded = Buffer.from(token, 'base64').toString('utf8');
+    const [hmac, tokenSalt, issuedAt, expiresAt] = decoded.split(':');
+    
+    if (!hmac || !tokenSalt || !issuedAt || !expiresAt) {
+      return { valid: false, error: "Invalid token format" };
+    }
+
+    // Validate salt consistency
+    if (tokenSalt !== providedSalt) {
+      return { valid: false, error: "Token salt mismatch" };
+    }
+
+    // Validate expiration timestamp consistency
+    if (expiresAt !== providedExpiresAt) {
+      return { valid: false, error: "Token expiration timestamp mismatch" };
+    }
+
+    // Parse timestamps
+    const now = Date.now();
+    const tokenExpirationTime = parseInt(expiresAt);
+    const providedValidUntilTime = parseInt(providedValidUntil);
+
+    // Check if token is expired (using token's internal expiration)
+    if (now > tokenExpirationTime) {
+      return { 
+        valid: false, 
+        error: "Token expired", 
+        expiredAt: new Date(tokenExpirationTime),
+        expiredSince: now - tokenExpirationTime
+      };
+    }
+
+    // Check if token is still within valid until time
+    if (now > providedValidUntilTime) {
+      return { 
+        valid: false, 
+        error: "Token validity period exceeded", 
+        validUntil: new Date(providedValidUntilTime)
+      };
+    }
+    
+    // Recreate the expected HMAC signature using provided salt
+    const payload = `${id}:${lastName}:${pid}:${providedSalt}:${issuedAt}:${expiresAt}`;
+    const expectedHmac = crypto.createHmac("sha256", process.env.PEPPER)
+      .update(payload)
+      .digest("hex");
+    
+    // Use crypto.timingSafeEqual to prevent timing attacks
+    const hmacBuffer = Buffer.from(hmac, 'hex');
+    const expectedHmacBuffer = Buffer.from(expectedHmac, 'hex');
+    
+    if (hmacBuffer.length !== expectedHmacBuffer.length || 
+        !crypto.timingSafeEqual(hmacBuffer, expectedHmacBuffer)) {
+      return { valid: false, error: "Invalid token signature" };
+    }
+    
+    return { 
+      valid: true, 
+      issuedAt: new Date(parseInt(issuedAt)),
+      expiresAt: new Date(tokenExpirationTime),
+      validUntil: new Date(providedValidUntilTime),
+      remainingTime: Math.min(tokenExpirationTime - now, providedValidUntilTime - now),
+      salt: tokenSalt
+    };
+    
+  } catch (error) {
+    return { valid: false, error: "Token verification failed", details: error.message };
+  }
+}
+
+/**
+ * Legacy token verification function (kept for backward compatibility)
  * @param {string} token - Base64 encoded token to verify
  * @param {string} id - Expected user ID
  * @param {string} lastName - Expected user's last name
@@ -397,22 +481,50 @@ module.exports = async function (context, req) {
   context.log("Request body structure:", Object.keys(req.body || {}));
   context.log("Full request body:", JSON.stringify(req.body, null, 2));
 
-  const { authToken, tokenSalt, projectId, id, lastName, ...otherFields } = req.body || {};
+  const { 
+    authToken, 
+    tokenSalt, 
+    tokenExpiresAt, 
+    tokenValidUntil, 
+    projectId, 
+    id, 
+    lastName, 
+    ...otherFields 
+  } = req.body || {};
 
-  // Validate required fields for new token format
-  if (!authToken || !projectId) {
-    context.log("❌ Missing required fields for token authentication:");
-    context.log(`authToken: ${!!authToken}, projectId: ${projectId}`);
+  // Validate required fields for enhanced token authentication
+  if (!authToken || !tokenSalt || !tokenExpiresAt || !tokenValidUntil || !projectId) {
+    context.log("❌ Missing required authentication fields:");
+    context.log(`authToken: ${!!authToken}`);
+    context.log(`tokenSalt: ${!!tokenSalt}`);
+    context.log(`tokenExpiresAt: ${!!tokenExpiresAt}`);
+    context.log(`tokenValidUntil: ${!!tokenValidUntil}`);
+    context.log(`projectId: ${!!projectId}`);
+    
     context.res = {
       status: 400,
       headers: {
         "Content-Type": "application/json",
         ...corsHeaders
       },
-      body: { error: "Missing authToken or projectId" }
+      body: { 
+        error: "Missing required authentication fields",
+        required: ["authToken", "tokenSalt", "tokenExpiresAt", "tokenValidUntil", "projectId"],
+        provided: Object.keys(req.body || {}).filter(key => 
+          ["authToken", "tokenSalt", "tokenExpiresAt", "tokenValidUntil", "projectId"].includes(key)
+        )
+      }
     };
     return;
   }
+
+  // Log authentication data for debugging
+  context.log("🔐 Authentication fields received:");
+  context.log(`  • authToken: ${authToken ? authToken.substring(0, 20) + '...' : 'missing'}`);
+  context.log(`  • tokenSalt: ${tokenSalt ? tokenSalt.substring(0, 10) + '...' : 'missing'}`);
+  context.log(`  • tokenExpiresAt: ${tokenExpiresAt}`);
+  context.log(`  • tokenValidUntil: ${tokenValidUntil}`);
+  context.log(`  • projectId: ${projectId}`);
 
   // Extract user credentials - check multiple possible sources
   // Note: id might be empty string, so check for truthy values
@@ -450,15 +562,33 @@ module.exports = async function (context, req) {
     ...otherFields
   };
 
-  // Verify the authentication token
-  context.log(`🔐 Verifying token for user ${userId}, project ${projectId}`);
-  const tokenVerification = verifySecureToken(authToken, userId, userLastName, projectId);
+  // Verify the authentication token with enhanced validation
+  context.log(`🔐 Verifying enhanced token for user ${userId}, project ${projectId}`);
+  context.log(`🕒 Token expires at: ${new Date(parseInt(tokenExpiresAt)).toISOString()}`);
+  context.log(`🕒 Token valid until: ${new Date(parseInt(tokenValidUntil)).toISOString()}`);
+  
+  const tokenVerification = verifyEnhancedToken(
+    authToken, 
+    tokenSalt, 
+    tokenExpiresAt, 
+    tokenValidUntil, 
+    userId, 
+    userLastName, 
+    projectId
+  );
   
   if (!tokenVerification.valid) {
-    context.log(`❌ Token verification failed: ${tokenVerification.error}`);
+    context.log(`❌ Enhanced token verification failed: ${tokenVerification.error}`);
     if (tokenVerification.expiredAt) {
       context.log(`🕒 Token expired at: ${tokenVerification.expiredAt.toISOString()}`);
     }
+    if (tokenVerification.validUntil) {
+      context.log(`🕒 Token was valid until: ${tokenVerification.validUntil.toISOString()}`);
+    }
+    if (tokenVerification.expiredSince) {
+      context.log(`🕒 Token expired ${Math.round(tokenVerification.expiredSince / 1000)} seconds ago`);
+    }
+    
     context.res = {
       status: 401,
       headers: {
@@ -468,14 +598,18 @@ module.exports = async function (context, req) {
       body: { 
         error: "Authentication failed", 
         reason: tokenVerification.error,
-        ...(tokenVerification.expiredAt && { expiredAt: tokenVerification.expiredAt.toISOString() })
+        ...(tokenVerification.expiredAt && { expiredAt: tokenVerification.expiredAt.toISOString() }),
+        ...(tokenVerification.validUntil && { validUntil: tokenVerification.validUntil.toISOString() })
       }
     };
     return;
   }
 
-  context.log(`✅ Token verified successfully for user ${userId}`);
+  context.log(`✅ Enhanced token verified successfully for user ${userId}`);
+  context.log(`🔐 Token salt validated: ${tokenVerification.salt.substring(0, 10)}...`);
   context.log(`🕒 Token remaining time: ${Math.round(tokenVerification.remainingTime / 1000 / 60)} minutes`);
+  context.log(`🕒 Token expires: ${tokenVerification.expiresAt.toISOString()}`);
+  context.log(`🕒 Token valid until: ${tokenVerification.validUntil.toISOString()}`);
 
   // Connect to the Claimants table for user validation
   const claimantsTableClient = TableClient.fromConnectionString(
