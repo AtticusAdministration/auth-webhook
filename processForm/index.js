@@ -469,6 +469,7 @@ module.exports = async function (context, req) {
     "http://localhost:7072",
     "https://newatticus.local",
     "https://www.mighty-geeks.com",
+    "https://www1.mighty-geeks.com",
     "https://mighty-geeks.com"
   ];
   
