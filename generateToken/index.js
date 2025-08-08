@@ -3,6 +3,58 @@ const { TableClient } = require("@azure/data-tables");
 const querystring = require("querystring");
 
 /**
+ * Checks if origin matches allowed patterns (supports wildcards)
+ * @param {string} origin - Request origin
+ * @param {string[]} patterns - Allowed origin patterns
+ * @returns {boolean} Whether origin is allowed
+ */
+function isOriginAllowed(origin, patterns) {
+  if (!origin) return false;
+  
+  return patterns.some(pattern => {
+    if (pattern === origin) return true;
+    
+    // Handle wildcard patterns
+    if (pattern.includes('*')) {
+      const regexPattern = pattern
+        .replace(/\./g, '\\.')  // Escape dots
+        .replace(/\*/g, '.*');  // Convert * to .*
+      const regex = new RegExp(`^${regexPattern}$`);
+      return regex.test(origin);
+    }
+    
+    return false;
+  });
+}
+
+/**
+ * Get standardized CORS configuration
+ * @param {string} origin - Request origin
+ * @returns {Object} CORS headers and allowed origin
+ */
+function getCorsConfig(origin) {
+  const allowedOriginPatterns = [
+    "http://localhost:*",           // Any localhost port for development
+    "https://*.mighty-geeks.com",   // Any subdomain
+    "https://mighty-geeks.com",     // Main domain
+    "https://newatticus.local"      // Development domain
+  ];
+  
+  const isAllowed = isOriginAllowed(origin, allowedOriginPatterns);
+  const allowedOrigin = isAllowed ? origin : "https://www.mighty-geeks.com";
+  
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
+    "Access-Control-Allow-Headers": "Content-Type, ocp-apim-subscription-key, Authorization, x-ms-client-request-id, Accept, Origin, X-Requested-With",
+    "Access-Control-Max-Age": "86400",
+    "Access-Control-Allow-Credentials": "false"
+  };
+  
+  return { corsHeaders, allowedOrigin, isAllowed };
+}
+
+/**
  * Generates a secure authentication token for form submission with expiration
  * Uses HMAC-SHA256 with server-side secret (PEPPER) for cryptographic security
  * @param {string} id - User ID
@@ -117,13 +169,13 @@ module.exports = async function (context, req) {
   // Validate environment configuration first
   const envValidation = validateEnvironment(context);
   if (!envValidation.valid) {
+    // Get CORS config for error responses
+    const { corsHeaders } = getCorsConfig(req.headers.origin);
     context.res = {
       status: 500,
       headers: {
         "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"
+        ...corsHeaders
       },
       body: { error: envValidation.error }
     };
@@ -132,29 +184,19 @@ module.exports = async function (context, req) {
 
   context.log("🔐 Token generation request received");
 
-  // Define allowed origins
-  const allowedOrigins = [
-    "http://localhost:8000",
-    "https://newatticus.local",
-    "https://www.mighty-geeks.com",
-    "https://www1.mighty-geeks.com",
-    "https://mighty-geeks.com"
-  ];
+  // Get enhanced CORS configuration
+  const { corsHeaders, allowedOrigin, isAllowed } = getCorsConfig(req.headers.origin);
   
-  // Get the origin from the request
-  const origin = req.headers.origin;
-  const allowedOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
+  context.log(`🌐 Origin: ${req.headers.origin}`);
+  context.log(`✅ Allowed: ${isAllowed}`);
+  context.log(`🔄 Using origin: ${allowedOrigin}`);
 
-  // Handle CORS preflight
+  // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
+    context.log("✅ CORS preflight handled");
     context.res = {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": allowedOrigin,
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Max-Age": "86400"
-      }
+      status: 200,
+      headers: corsHeaders
     };
     return;
   }
@@ -176,11 +218,10 @@ module.exports = async function (context, req) {
     context.res = {
       status: 400,
       headers: {
-        "Access-Control-Allow-Origin": allowedOrigin,
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"
+        "Content-Type": "application/json",
+        ...corsHeaders
       },
-      body: "Missing id, lastName, redirectBaseUrl, or pid"
+      body: { error: "Missing required fields: id, lastName, redirectBaseUrl, or pid" }
     };
     return;
   }
@@ -246,9 +287,7 @@ module.exports = async function (context, req) {
       status: 200,
       headers: {
         "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": allowedOrigin,
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"
+        ...corsHeaders
       },
       body: {
         projectFormJson: projectFormJson,
@@ -271,11 +310,10 @@ module.exports = async function (context, req) {
     context.res = {
       status: 401,
       headers: {
-        "Access-Control-Allow-Origin": allowedOrigin,
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type"
+        "Content-Type": "application/json",
+        ...corsHeaders
       },
-      body: "Invalid ID or last_name"
+      body: { error: "Invalid ID or last_name" }
     };
   }
 };

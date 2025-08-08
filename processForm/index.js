@@ -4,6 +4,62 @@ const { BlobServiceClient } = require("@azure/storage-blob");
 const PDFDocument = require('pdfkit');
 
 /**
+ * Checks if an origin matches any of the allowed origin patterns
+ * @param {string} origin - The origin to check
+ * @param {string[]} allowedPatterns - Array of allowed origin patterns
+ * @returns {boolean} True if origin is allowed
+ */
+function isOriginAllowed(origin, allowedPatterns) {
+  if (!origin) return false;
+  
+  return allowedPatterns.some(pattern => {
+    if (pattern === origin) return true;
+    
+    // Handle wildcard patterns like http://localhost:*
+    if (pattern.includes('*')) {
+      const regexPattern = pattern
+        .replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // Escape regex chars
+        .replace('\\*', '.*'); // Replace \* with .*
+      return new RegExp(`^${regexPattern}$`).test(origin);
+    }
+    
+    return false;
+  });
+}
+
+/**
+ * Gets comprehensive CORS configuration for a given origin
+ * @param {string} origin - The origin from the request
+ * @returns {Object} CORS configuration object
+ */
+function getCorsConfig(origin) {
+  const allowedOriginPatterns = [
+    "http://localhost:*",
+    "https://newatticus.local",
+    "https://www.mighty-geeks.com",
+    "https://www1.mighty-geeks.com",  
+    "https://mighty-geeks.com"
+  ];
+
+  const isAllowed = isOriginAllowed(origin, allowedOriginPatterns);
+  const allowedOrigin = isAllowed ? origin : "http://localhost:8000";
+
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, ocp-apim-subscription-key, x-ms-client-request-id, Accept, Origin, X-Requested-With",
+    "Access-Control-Max-Age": "86400",
+    "Access-Control-Allow-Credentials": "false"
+  };
+
+  return {
+    corsHeaders,
+    allowedOrigin,
+    isAllowed
+  };
+}
+
+/**
  * Generates PDF from form template and submission data using PDFKit
  * @param {Object|string} projectFormJson - Form template with steps structure
  * @param {Object} submissionData - User submitted form data
@@ -449,13 +505,13 @@ module.exports = async function (context, req) {
   // Validate environment configuration first
   const envValidation = validateEnvironment(context);
   if (!envValidation.valid) {
+    // Get CORS config for error responses
+    const { corsHeaders } = getCorsConfig(req.headers.origin);
     context.res = {
       status: 500,
       headers: {
         "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, ocp-apim-subscription-key, Authorization, x-ms-client-request-id, Accept, Origin, X-Requested-With"
+        ...corsHeaders
       },
       body: { error: envValidation.error }
     };
@@ -464,28 +520,14 @@ module.exports = async function (context, req) {
 
   context.log("📝 Form submission request received");
 
-  // Define allowed origins (same as generateToken)
-  const allowedOrigins = [
-    "http://localhost:7072",
-    "https://newatticus.local",
-    "https://www.mighty-geeks.com",
-    "https://www1.mighty-geeks.com",
-    "https://mighty-geeks.com"
-  ];
+  // Get enhanced CORS configuration
+  const { corsHeaders, allowedOrigin, isAllowed } = getCorsConfig(req.headers.origin);
   
-  // Get the origin from the request
-  const origin = req.headers.origin;
-  const allowedOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
+  context.log(`🌐 Origin: ${req.headers.origin}`);
+  context.log(`✅ Allowed: ${isAllowed}`);
+  context.log(`🔄 Using origin: ${allowedOrigin}`);
 
-  // Enhanced CORS headers with additional allowed headers
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": allowedOrigin,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, ocp-apim-subscription-key, Authorization, x-ms-client-request-id, Accept, Origin, X-Requested-With",
-    "Access-Control-Max-Age": "86400"
-  };
-
-  // CORS preflight handler
+  // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
     context.log("✅ CORS preflight handled");
     context.res = {
