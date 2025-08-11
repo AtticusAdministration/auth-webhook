@@ -60,6 +60,101 @@ function getCorsConfig(origin) {
 }
 
 /**
+ * Extracts file names from form submission data for file upload fields
+ * @param {string} html - HTML content that may contain file input fields
+ * @param {Object} submissionData - Form submission data
+ * @returns {Array} Array of file information objects
+ */
+function extractFileNames(html, submissionData) {
+  const fileInputs = [];
+  
+  // Look for file input fields in HTML
+  const fileInputPattern = /<input[^>]+type=['"]file['"][^>]*>/gi;
+  const matches = html.match(fileInputPattern) || [];
+  
+  matches.forEach(match => {
+    // Extract the name attribute
+    const nameMatch = match.match(/name=['"]([^'"]+)['"]/i);
+    if (nameMatch) {
+      const fieldName = nameMatch[1];
+      const value = submissionData[fieldName];
+      
+      if (value) {
+        // Handle different file name formats
+        let fileNames = [];
+        if (typeof value === 'string') {
+          // Could be comma-separated file names or single file name
+          fileNames = value.split(',').map(name => name.trim()).filter(name => name);
+        } else if (Array.isArray(value)) {
+          fileNames = value.filter(name => name && name.trim());
+        }
+        
+        if (fileNames.length > 0) {
+          // Extract label from HTML if available
+          const labelPattern = new RegExp(`<label[^>]*for=['"]${fieldName}['"][^>]*>([^<]+)</label>`, 'i');
+          const labelMatch = html.match(labelPattern);
+          let label = labelMatch ? labelMatch[1].trim() : formatFieldName(fieldName);
+          
+          fileInputs.push({
+            fieldName,
+            label,
+            fileNames,
+            count: fileNames.length
+          });
+        }
+      }
+    }
+  });
+  
+  return fileInputs;
+}
+
+/**
+ * Adds file information to the PDF document
+ * @param {PDFDocument} doc - PDFKit document instance
+ * @param {Array} fileInfo - Array of file information objects
+ */
+function addFileInfoToPdf(doc, fileInfo) {
+  if (fileInfo.length === 0) return;
+  
+  // Check if we need a new page
+  if (doc.y > doc.page.height - 120) {
+    doc.addPage();
+  }
+  
+  // Files section header
+  doc.fontSize(12)
+     .fillColor('#4a90e2')
+     .font('Helvetica-Bold')
+     .text('📎 Uploaded Files', 50, doc.y);
+  
+  doc.moveDown(0.5);
+  
+  fileInfo.forEach(file => {
+    // File field label
+    doc.fontSize(10)
+       .fillColor('#333333')
+       .font('Helvetica-Bold')
+       .text(`${file.label}:`, 60, doc.y);
+    
+    doc.moveDown(0.3);
+    
+    // List file names
+    file.fileNames.forEach(fileName => {
+      doc.fontSize(9)
+         .fillColor('#666666')
+         .font('Helvetica')
+         .text(`• ${fileName}`, 80, doc.y);
+      doc.moveDown(0.2);
+    });
+    
+    doc.moveDown(0.3);
+  });
+  
+  doc.moveDown(0.5);
+}
+
+/**
  * Generates PDF from form template and submission data using PDFKit
  * @param {Object|string} projectFormJson - Form template with steps structure
  * @param {Object} submissionData - User submitted form data
@@ -119,9 +214,39 @@ async function generatePdfFromData(projectFormJson, submissionData) {
 
       // Process form structure dynamically
       if (formStructure.steps && Array.isArray(formStructure.steps)) {
-        formStructure.steps.forEach((step, index) => {
-          addStepToPdf(doc, step, submissionData, index + 1);
+        // Filter out review/submit steps that shouldn't appear in final PDF
+        const filteredSteps = formStructure.steps.filter(step => {
+          const title = (step.title || '').toLowerCase();
+          const html = (step.html || '').toLowerCase();
+          
+          // Skip steps that are review/submit related
+          const isReviewStep = title.includes('review') || 
+                              title.includes('submit') || 
+                              title.includes('confirmation') ||
+                              html.includes('submit') ||
+                              html.includes('review your');
+          
+          return !isReviewStep;
         });
+        
+        // Track all file information across steps
+        const allFileInfo = [];
+        
+        filteredSteps.forEach((step, index) => {
+          addStepToPdf(doc, step, submissionData, index + 1);
+          
+          // Extract file information from this step
+          if (step.html) {
+            const fileInfo = extractFileNames(step.html, submissionData);
+            allFileInfo.push(...fileInfo);
+          }
+        });
+        
+        // Add file information section at the end
+        if (allFileInfo.length > 0) {
+          addFileInfoToPdf(doc, allFileInfo);
+        }
+        
       } else if (formStructure.fields && Array.isArray(formStructure.fields)) {
         // Handle field-based forms
         formStructure.fields.forEach(field => {
@@ -431,58 +556,6 @@ function verifyEnhancedToken(token, providedSalt, providedExpiresAt, providedVal
 }
 
 /**
- * Legacy token verification function (kept for backward compatibility)
- * @param {string} token - Base64 encoded token to verify
- * @param {string} id - Expected user ID
- * @param {string} lastName - Expected user's last name
- * @param {string} pid - Expected project ID
- * @returns {Object} Verification result with success flag and details
- */
-function verifySecureToken(token, id, lastName, pid) {
-  try {
-    // Decode the token
-    const decoded = Buffer.from(token, 'base64').toString('utf8');
-    const [hmac, salt, issuedAt, expiresAt] = decoded.split(':');
-    
-    if (!hmac || !salt || !issuedAt || !expiresAt) {
-      return { valid: false, error: "Invalid token format" };
-    }
-    
-    // Check if token is expired
-    const now = Date.now();
-    const expirationTime = parseInt(expiresAt);
-    if (now > expirationTime) {
-      return { valid: false, error: "Token expired", expiredAt: new Date(expirationTime) };
-    }
-    
-    // Recreate the expected HMAC signature
-    const payload = `${id}:${lastName}:${pid}:${salt}:${issuedAt}:${expiresAt}`;
-    const expectedHmac = crypto.createHmac("sha256", process.env.PEPPER)
-      .update(payload)
-      .digest("hex");
-    
-    // Use crypto.timingSafeEqual to prevent timing attacks
-    const hmacBuffer = Buffer.from(hmac, 'hex');
-    const expectedHmacBuffer = Buffer.from(expectedHmac, 'hex');
-    
-    if (hmacBuffer.length !== expectedHmacBuffer.length || 
-        !crypto.timingSafeEqual(hmacBuffer, expectedHmacBuffer)) {
-      return { valid: false, error: "Invalid token signature" };
-    }
-    
-    return { 
-      valid: true, 
-      issuedAt: new Date(parseInt(issuedAt)),
-      expiresAt: new Date(expirationTime),
-      remainingTime: expirationTime - now
-    };
-    
-  } catch (error) {
-    return { valid: false, error: "Token verification failed", details: error.message };
-  }
-}
-
-/**
  * Validates environment configuration required for secure operation
  * @param {Object} context - Azure Function context for logging
  * @returns {Object} Validation result with success flag and error message
@@ -724,21 +797,25 @@ module.exports = async function (context, req) {
       context.log("⚠️ Error fetching form JSON for PDF:", e.message);
     }
 
-    // Generate PDF using PDFKit
-    context.log("📄 Starting PDF generation with PDFKit...");
+    // Generate PDF using PDFKit with enhanced file name handling and review step filtering
+    context.log("📄 Starting PDF generation with enhanced filtering...");
     const pdfBuffer = await generatePdfFromData(projectFormJson, { ...formData, submissionId, projectId });
     
-    // Upload PDF to Azure Blob Storage
-    const pdfFileName = `submission-${projectId}-${submissionId}.pdf`;
+    // Upload PDF to Azure Blob Storage with descriptive filename
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+    const userPart = userLastName.replace(/[^a-zA-Z0-9]/g, '');
+    const pdfFileName = `submission-${userPart}-${projectId}-${timestamp}-${submissionId.substr(-8)}.pdf`;
     const pdfUrl = await uploadPdfToBlob(pdfBuffer, pdfFileName);
     
     context.log("✅ PDF generated and uploaded successfully");
     context.log(`🔗 PDF URL: ${pdfUrl}`);
+    context.log(`📄 PDF filename: ${pdfFileName}`);
 
     // Include PDF URL in the form data for storage
     const formDataWithPdf = {
       ...formData,
-      pdfUrl: pdfUrl
+      pdfUrl: pdfUrl,
+      pdfFileName: pdfFileName
     };
     
     // Create submission entity for the Submissions table
@@ -771,7 +848,8 @@ module.exports = async function (context, req) {
         redirectUrl: redirectUrl,
         submittedAt: submittedAt,
         submissionId: submissionId,
-        pdfUrl: pdfUrl
+        pdfUrl: pdfUrl,
+        pdfFileName: pdfFileName
       }
     };
 
